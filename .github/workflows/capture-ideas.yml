@@ -19,6 +19,17 @@ on:
         type: string
         default: "168"
 
+# Dedup works by checking Slack for this bot's confirmation reply, which is
+# only posted after the ticket exists. Two overlapping runs therefore both see
+# "not yet filed" and file the same message twice — this happened on
+# 2026-08-13, producing MPR-468/469 and duplicates MPR-470/471 seven seconds
+# apart. Queue runs instead of cancelling: cancelling mid-flight could kill a
+# run between creating the issue and posting the reply, which would leave a
+# ticket dedup can never see.
+concurrency:
+  group: capture-ideas
+  cancel-in-progress: false
+
 jobs:
   capture:
     runs-on: ubuntu-latest
