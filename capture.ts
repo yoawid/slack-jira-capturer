@@ -214,7 +214,7 @@ async function main() {
       `${DRY_RUN ? " MODE=DRY-RUN (creates nothing)" : " MODE=LIVE"}`,
   );
 
-  let summary = "";
+  let streamed = "";
 
   for await (const message of query({
     prompt: DRY_RUN ? DRY_PROMPT : LIVE_PROMPT,
@@ -244,21 +244,27 @@ async function main() {
 
     if (message.type === "assistant") {
       for (const block of message.message.content) {
-        if (block.type === "text") process.stdout.write(block.text);
+        if (block.type === "text") {
+          streamed += block.text;
+          process.stdout.write(block.text);
+        }
         if (block.type === "tool_use") console.log(`\n[tool] ${block.name}`);
       }
     }
 
     if (message.type === "result") {
-      if (message.subtype === "success") {
-        summary = message.result;
-      } else {
+      if (message.subtype !== "success") {
         throw new Error(`Agent run ended: ${message.subtype}`);
+      }
+      // The result is normally the last assistant message, already streamed
+      // above. Only echo it if it wasn't, so the log isn't duplicated.
+      if (!streamed.includes(message.result.trim())) {
+        console.log(`\n\n=== Summary ===\n${message.result}`);
       }
     }
   }
 
-  console.log(`\n\n=== Summary ===\n${summary}`);
+  console.log();
 }
 
 main().catch((err) => {
