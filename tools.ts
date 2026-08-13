@@ -74,6 +74,7 @@ function parseTemplate(msg: SlackMessageRaw): {
   pre_title: string;
   product_area?: string;
   body: string;
+  submitter_id?: string;
 } | null {
   const text = msg.text ?? "";
   if (!/submitted feedback/i.test(text)) return null;
@@ -86,7 +87,18 @@ function parseTemplate(msg: SlackMessageRaw): {
   const productClean = product?.replace(/&amp;/g, "&");
   const detailsMatch = text.match(/Details:\s*\n?([\s\S]*)$/i);
   const details = detailsMatch?.[1]?.trim() ?? "";
-  return { pre_title: title, product_area: productClean, body: details || title };
+  // These are posted by a workflow, so msg.user is empty and the author would
+  // otherwise resolve to "Unknown". The real submitter is the mention in the
+  // header line — anchored there so a mention inside Details can't win.
+  const submitter = text.match(
+    /^\s*<@([UW][A-Z0-9]+)>[^\n]*submitted feedback/i,
+  )?.[1];
+  return {
+    pre_title: title,
+    product_area: productClean,
+    body: details || title,
+    submitter_id: submitter,
+  };
 }
 
 async function hasBotConfirmation(channel: string, thread_ts: string): Promise<boolean> {
@@ -165,6 +177,7 @@ export async function getReactionCandidates(input: {
     let source: ReactionCandidate["source"];
     let pre_title: string | undefined;
     let product_area: string | undefined;
+    let submitter_id: string | undefined;
     let body: string;
 
     if (ybug) {
@@ -175,16 +188,20 @@ export async function getReactionCandidates(input: {
       source = "template";
       pre_title = template.pre_title;
       product_area = template.product_area;
+      submitter_id = template.submitter_id;
       body = template.body;
     } else {
       source = "generic";
       body = extractGenericText(msg);
     }
 
-    // Resolve author: prefer the message poster; fall back to bot/username/reactor.
+    // Resolve author: prefer the message poster, then a submitter named inside
+    // the message body, then bot/username/reactor.
     let author: string;
     if (msg.user) {
       author = await resolveUserName(msg.user);
+    } else if (submitter_id) {
+      author = await resolveUserName(submitter_id);
     } else if (msg.bot_profile?.name) {
       author = `${msg.bot_profile.name} (bot)`;
     } else if (msg.username) {
