@@ -6,11 +6,19 @@ on:
     # Off the top-of-hour to reduce GitHub Actions cron queue delays.
     - cron: "47 4 * * *"
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "dry-run reads Slack and reports only; live files tickets"
+        type: choice
+        options:
+          - dry-run
+          - live
+        default: dry-run
 
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -21,12 +29,14 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run capture
+      - run: npm run capture:agent
         env:
+          # Claude subscription auth. ANTHROPIC_API_KEY is deliberately NOT set:
+          # in headless mode it overrides this token and bills API credits.
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Scheduled runs are always live; manual runs default to dry-run.
+          CAPTURE_DRY_RUN: ${{ (github.event_name == 'schedule' || github.event.inputs.mode == 'live') && '0' || '1' }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ATLASSIAN_SITE: ${{ secrets.ATLASSIAN_SITE }}
           ATLASSIAN_EMAIL: ${{ secrets.ATLASSIAN_EMAIL }}
           ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          AGENT_ID: ${{ secrets.AGENT_ID }}
-          ENV_ID: ${{ secrets.ENV_ID }}
