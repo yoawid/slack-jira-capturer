@@ -14,6 +14,10 @@ on:
           - dry-run
           - live
         default: dry-run
+      since_hours:
+        description: "How far back to look, in hours (168 = 7 days)"
+        type: string
+        default: "168"
 
 jobs:
   capture:
@@ -36,6 +40,8 @@ jobs:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Scheduled runs are always live; manual runs default to dry-run.
           CAPTURE_DRY_RUN: ${{ (github.event_name == 'schedule' || github.event.inputs.mode == 'live') && '0' || '1' }}
+          # Scheduled runs use the code default (168h); manual runs may widen it.
+          CAPTURE_SINCE_HOURS: ${{ github.event.inputs.since_hours }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           ATLASSIAN_SITE: ${{ secrets.ATLASSIAN_SITE }}
           ATLASSIAN_EMAIL: ${{ secrets.ATLASSIAN_EMAIL }}

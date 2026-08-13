@@ -14,10 +14,13 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { z } from "zod";
 import { createBugTicket, createPolarisIdea, getReactionCandidates } from "./tools.ts";
 
-const MODEL = process.env.CAPTURE_MODEL ?? "claude-opus-5";
-const MAX_TURNS = Number(process.env.CAPTURE_MAX_TURNS ?? 60);
-const CHANNEL = process.env.CAPTURE_CHANNEL ?? "product-management";
-const SINCE_HOURS = Number(process.env.CAPTURE_SINCE_HOURS ?? 168);
+// `||` not `??`: a workflow_dispatch input that wasn't supplied arrives as an
+// empty string, not undefined, and Number("") is 0 — which would silently make
+// a scheduled run look back zero hours and find nothing.
+const MODEL = process.env.CAPTURE_MODEL || "claude-opus-5";
+const MAX_TURNS = Number(process.env.CAPTURE_MAX_TURNS || 60);
+const CHANNEL = process.env.CAPTURE_CHANNEL || "product-management";
+const SINCE_HOURS = Number(process.env.CAPTURE_SINCE_HOURS || 168);
 
 // Dry run proves auth, Slack access and dedup without creating anything. The
 // create tools aren't registered at all rather than merely denied, so a
