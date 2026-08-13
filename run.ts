@@ -513,7 +513,37 @@ async function main() {
   console.log(`\n\nDone. Session: ${session.id}`);
 }
 
+// Known-cause API failures get a one line fix instead of a stack dump. Anything
+// unrecognised keeps the full error — losing debuggability is worse than noise.
+function explainFatal(err: unknown): string | null {
+  const status = (err as { status?: number })?.status;
+  const message = String(
+    (err as { error?: { error?: { message?: string } } })?.error?.error?.message ?? "",
+  );
+
+  if (status === 400 && /credit balance is too low/i.test(message)) {
+    return "Anthropic credit balance is empty. Top up at platform.claude.com under Plans & Billing, and enable auto-reload so it cannot hit zero unnoticed. Note credits also expire one year after purchase.";
+  }
+  if (status === 401 || status === 403) {
+    return "ANTHROPIC_API_KEY was rejected. Check the secret is set and has not been revoked.";
+  }
+  if (status === 429) {
+    return "Rate limited by the Anthropic API.";
+  }
+  return null;
+}
+
 main().catch((err) => {
-  console.error(err);
+  const cause = explainFatal(err);
+  if (!cause) {
+    console.error(err);
+    process.exit(1);
+  }
+
+  console.error(`\nCapture aborted: ${cause}`);
+  // Re-running is safe: dedup checks both Jira and the Slack thread before filing.
+  console.error(
+    "Re-run once fixed. Reactions stay capturable for 7 days after they are posted — a failure lasting longer than that drops them silently.",
+  );
   process.exit(1);
 });
