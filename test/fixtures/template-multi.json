@@ -1,0 +1,6 @@
+{
+  "type": "message",
+  "ts": "1700000002.000300",
+  "text": "<@U0000000001|Sam Example> - submitted feedback\n\n• Title: Weight recent reference data higher\n• Product: Smart Control, Reporting &amp; Insights\n• Type: Pain point\n• Impact: 4\n\nDetails:\nOld reference data should age out faster.\nFresh data matters more in shoulder seasons.",
+  "reactions": [{ "name": "light_bulb", "users": ["U0000000003"], "count": 1 }]
+}

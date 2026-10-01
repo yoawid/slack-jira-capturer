@@ -1,0 +1,29 @@
+{
+  "slack": {
+    "channel_id": "C0XXXXXXXXX",
+    "since_hours": 168
+  },
+  "jira": {
+    "site": "your-site.atlassian.net",
+    "idea": {
+      "project_key": "PROJ",
+      "issue_type_id": "10001",
+      "planning_status": { "field_id": "customfield_10001", "option_id": "10001" },
+      "product_area": {
+        "field_id": "customfield_10002",
+        "options": {
+          "User interfaces": "10011",
+          "Smart control": "10012",
+          "Integrations": "10013",
+          "Reporting & Insights": "10014"
+        },
+        "default_for_ybug": "User interfaces"
+      },
+      "impact_field_id": "customfield_10003"
+    },
+    "bug": {
+      "project_key": "BUG",
+      "issue_type_id": "10004"
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "type": "message",
+  "ts": "1700000005.000600",
+  "user": "U0000000001",
+  "text": "The export button throws a 500 on large buildings.",
+  "reactions": [
+    { "name": "bulb", "users": ["U0000000005"], "count": 1 },
+    { "name": "bug", "users": ["U0000000006"], "count": 1 }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "type": "message",
+  "ts": "1700000004.000500",
+  "user": "U0000000001",
+  "text": "Suggestion: let <@U0000000004> and I try <https://example.com/doc|the new changelog format> for release notes.\nSecond line with a bare link <https://example.com/x> &amp; an ampersand.",
+  "reactions": [{ "name": "bulb", "users": ["U0000000005"], "count": 1 }]
+}

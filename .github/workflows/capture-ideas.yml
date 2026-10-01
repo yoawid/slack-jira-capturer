@@ -2,8 +2,8 @@ name: Capture Slack ideas/bugs
 
 on:
   schedule:
-    # 04:47 UTC daily ≈ 05:47 (winter) / 06:47 (summer) Stockholm.
-    # Off the top-of-hour to reduce GitHub Actions cron queue delays.
+    # 04:47 UTC daily. Off the top of the hour to dodge the worst cron queueing;
+    # expect GitHub to run it anywhere up to a few hours late regardless.
     - cron: "47 4 * * *"
   workflow_dispatch:
     inputs:
@@ -15,23 +15,24 @@ on:
           - live
         default: dry-run
       since_hours:
-        description: "How far back to look, in hours (168 = 7 days)"
+        description: "Look-back window in hours. Empty = value from the config file."
         type: string
-        default: "168"
+        default: ""
 
-# Dedup works by checking Slack for this bot's confirmation reply, which is
-# only posted after the ticket exists. Two overlapping runs therefore both see
-# "not yet filed" and file the same message twice — this happened on
-# 2026-08-13, producing MPR-468/469 and duplicates MPR-470/471 seven seconds
-# apart. Queue runs instead of cancelling: cancelling mid-flight could kill a
-# run between creating the issue and posting the reply, which would leave a
-# ticket dedup can never see.
+# Dedup has two markers (a Jira label set at creation and a Slack reply posted
+# after), but two runs in flight at the same time could still both see "not
+# filed" in the gap between them. Queue runs instead of cancelling: cancelling
+# a run between creating the issue and posting the reply is exactly how two
+# ideas were double-filed in an earlier version.
 concurrency:
   group: capture-ideas
   cancel-in-progress: false
 
 jobs:
   capture:
+    # The public repository holds the code only. Set CAPTURE_ENABLED=true as a
+    # repository variable in the private deployment that owns the secrets.
+    if: ${{ vars.CAPTURE_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -44,16 +45,21 @@ jobs:
 
       - run: npm ci
 
-      - run: npm run capture:agent
+      - name: Write config from repository variable
         env:
-          # Claude subscription auth. ANTHROPIC_API_KEY is deliberately NOT set:
-          # in headless mode it overrides this token and bills API credits.
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          CAPTURE_CONFIG_JSON: ${{ vars.CAPTURE_CONFIG_JSON }}
+        run: |
+          if [ -z "$CAPTURE_CONFIG_JSON" ]; then
+            echo "::error::Repository variable CAPTURE_CONFIG_JSON is not set"; exit 1
+          fi
+          printf '%s' "$CAPTURE_CONFIG_JSON" > capture.config.json
+
+      - name: Capture
+        env:
           # Scheduled runs are always live; manual runs default to dry-run.
           CAPTURE_DRY_RUN: ${{ (github.event_name == 'schedule' || github.event.inputs.mode == 'live') && '0' || '1' }}
-          # Scheduled runs use the code default (168h); manual runs may widen it.
           CAPTURE_SINCE_HOURS: ${{ github.event.inputs.since_hours }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          ATLASSIAN_SITE: ${{ secrets.ATLASSIAN_SITE }}
           ATLASSIAN_EMAIL: ${{ secrets.ATLASSIAN_EMAIL }}
           ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+        run: npm run capture

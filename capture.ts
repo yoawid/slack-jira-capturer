@@ -1,280 +1,204 @@
-// Entry point: drives the capture with the Claude Agent SDK.
-//
-// Replaces the Managed Agents path in run.ts. The three custom tools run
-// in-process via an SDK MCP server, so Slack and Atlassian credentials stay in
-// this process — there is no sandbox container that could see them.
-//
-// Auth: uses CLAUDE_CODE_OAUTH_TOKEN (Claude subscription). ANTHROPIC_API_KEY
-// must NOT be set — in non-interactive mode it overrides the subscription and
-// bills API credits instead.
+// Entry point. Slack reactions in, Jira issues out, a threaded reply back.
+// Every decision is a rule in parsers.ts; nothing here asks a model anything.
 import dotenv from "dotenv";
-dotenv.config({ override: true });
+dotenv.config({ quiet: true });
 
-import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
-import { z } from "zod";
-import { createBugTicket, createPolarisIdea, getReactionCandidates } from "./tools.ts";
+import { appendFileSync } from "node:fs";
+import { loadConfig, loadSecrets, type Config } from "./config.ts";
+import { JiraClient, adf, slackTsLabel } from "./jira.ts";
+import {
+  buildDescription,
+  deriveTitle,
+  detectReaction,
+  mapProductArea,
+  mentionedUserIds,
+  parseMessage,
+  reactorsOf,
+  stripSlackMarkup,
+  type Parsed,
+  type Reaction,
+} from "./parsers.ts";
+import { withRetry } from "./retry.ts";
+import { SlackClient, confirmationText, type SlackMessage } from "./slack.ts";
 
-// `||` not `??`: a workflow_dispatch input that wasn't supplied arrives as an
-// empty string, not undefined, and Number("") is 0 — which would silently make
-// a scheduled run look back zero hours and find nothing.
-const MODEL = process.env.CAPTURE_MODEL || "claude-opus-5";
-const MAX_TURNS = Number(process.env.CAPTURE_MAX_TURNS || 60);
-const CHANNEL = process.env.CAPTURE_CHANNEL || "product-management";
-const SINCE_HOURS = Number(process.env.CAPTURE_SINCE_HOURS || 168);
+const DRY_RUN = process.argv.includes("--dry-run") || process.env.CAPTURE_DRY_RUN === "1";
+// Titles and permalinks are internal; keep them out of CI logs unless asked.
+const VERBOSE = DRY_RUN || process.env.CAPTURE_VERBOSE === "1";
 
-// Dry run proves auth, Slack access and dedup without creating anything. The
-// create tools aren't registered at all rather than merely denied, so a
-// misbehaving prompt cannot reach them.
-const DRY_RUN = process.env.CAPTURE_DRY_RUN === "1";
+const log = (message: string) => console.log(message);
+const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const icon = (reaction: Reaction) => (reaction === "bulb" ? "💡" : "🐛");
 
-const ok = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data) }],
-});
+type Candidate = { msg: SlackMessage; reaction: Reaction; parsed: Parsed; label: string };
 
-// Compose the message Claude reads on failure, rather than letting a raw
-// exception through — it needs enough to decide whether to retry or move on.
-const fail = (where: string, err: unknown) => ({
-  content: [
-    {
-      type: "text" as const,
-      text: `${where} failed: ${err instanceof Error ? err.message : String(err)}`,
-    },
-  ],
-  isError: true,
-});
+type Outcome = {
+  reaction: Reaction;
+  status: "created" | "created_no_reply" | "failed";
+  key?: string;
+  error?: string;
+};
 
-const readCandidates = tool(
-  "get_reaction_candidates",
-  "Fetch Slack messages from a channel posted within the last N hours that have a 💡 (`bulb`) OR 🐛 (`bug`) emoji reaction. Returns each candidate with its `reaction` type, source (ybug / template / generic), pre-extracted title/product_area when available, text body, author, permalink, and slack_channel_id + slack_ts for posting confirmation replies. Messages already filed in a previous run are removed before returning.",
-  {
-    channel: z.string().describe("Channel name without the # prefix"),
-    since_hours: z
-      .number()
-      .int()
-      .default(SINCE_HOURS)
-      .describe("How far back to look in hours"),
-  },
-  async (args) => {
-    try {
-      return ok(await getReactionCandidates(args));
-    } catch (err) {
-      return fail("get_reaction_candidates", err);
+async function resolveAuthor(c: Candidate, slack: SlackClient): Promise<string> {
+  const { msg, parsed, reaction } = c;
+  let author: string;
+  if (msg.user) author = await slack.userName(msg.user);
+  else if (parsed.submitterId) author = await slack.userName(parsed.submitterId);
+  else if (msg.bot_profile?.name) author = `${msg.bot_profile.name} (bot)`;
+  else if (msg.username) author = `${msg.username} (bot)`;
+  else author = "Unknown";
+  // A bot post has no human author, so credit whoever flagged it.
+  const reactors = reactorsOf(msg, reaction);
+  if (!msg.user && reactors.length > 0) author += `, flagged by ${await slack.userName(reactors[0]!)}`;
+  return author;
+}
+
+async function prepare(c: Candidate, config: Config, slack: SlackClient) {
+  const { msg, parsed, reaction } = c;
+  const names = new Map<string, string>();
+  for (const id of mentionedUserIds(parsed.body)) names.set(id, await slack.userName(id));
+  const body = stripSlackMarkup(parsed.body, names);
+  const title = deriveTitle(parsed.source, parsed.preTitle, body);
+  const author = await resolveAuthor(c, slack);
+  const permalink = await slack.permalink(config.slack.channel_id, msg.ts);
+
+  const idea = config.jira.idea;
+  const areaConfig = reaction === "bulb" ? idea.product_area : undefined;
+  const areaValues =
+    parsed.source === "ybug" && areaConfig?.default_for_ybug ? [areaConfig.default_for_ybug] : parsed.productValues;
+  const productArea = areaConfig ? mapProductArea(areaValues, areaConfig.options) : null;
+
+  const description = buildDescription({
+    body,
+    author,
+    permalink,
+    productValues: parsed.source === "template" ? parsed.productValues : [],
+    type: parsed.type,
+    impact: parsed.impact,
+    productAreaUnmapped: Boolean(areaConfig && areaValues.length > 0 && !productArea),
+  });
+
+  const fields: Record<string, unknown> = { summary: title, description: adf(description), labels: [c.label] };
+  if (reaction === "bulb") {
+    fields.project = { key: idea.project_key };
+    fields.issuetype = { id: idea.issue_type_id };
+    if (idea.planning_status) fields[idea.planning_status.field_id] = { id: idea.planning_status.option_id };
+    if (productArea && areaConfig) fields[areaConfig.field_id] = { id: productArea.option_id };
+    if (idea.impact_field_id && parsed.impact !== undefined && parsed.impact >= 1 && parsed.impact <= 5) {
+      fields[idea.impact_field_id] = parsed.impact;
     }
-  },
-  // Read-only: safe to batch, and never creates anything.
-  { annotations: { readOnlyHint: true } },
-);
+  } else {
+    fields.project = { key: config.jira.bug.project_key };
+    fields.issuetype = { id: config.jira.bug.issue_type_id };
+  }
+  const optionalFieldIds = [idea.planning_status?.field_id, areaConfig?.field_id, idea.impact_field_id].filter(
+    (id): id is string => Boolean(id),
+  );
+  return { title, author, permalink, productArea, fields, optionalFieldIds };
+}
 
-const createIdea = tool(
-  "create_polaris_idea",
-  "Create a Jira Polaris idea in the given project AND post a confirmation reply in the original Slack thread. Returns the new issue key and URL on success. Always pass slack_channel_id and slack_ts from the candidate so the reply is threaded correctly.",
-  {
-    project_key: z.string(),
-    idea_issue_type_id: z.string(),
-    title: z.string().describe("Idea summary, ≤ 80 chars"),
-    description: z.string(),
-    product_area_field_id: z.string(),
-    product_area_option_id: z.string(),
-    planning_status_option_id: z.string(),
-    slack_channel_id: z.string().describe("From candidate.slack_channel_id"),
-    slack_ts: z.string().describe("From candidate.slack_ts"),
-  },
-  async (args) => {
-    try {
-      return ok(await createPolarisIdea(args));
-    } catch (err) {
-      return fail("create_polaris_idea", err);
-    }
-  },
-);
-
-const createBug = tool(
-  "create_bug_ticket",
-  "Create a Jira Bug ticket in project NET AND post a confirmation reply in the original Slack thread. Project (NET) and issue type (Bug) are filled in for you — provide only title and description. Returns the new issue key and URL on success.",
-  {
-    title: z.string().describe('Bug summary (Jira "summary" field). ≤ 80 chars.'),
-    description: z.string().describe("Plain text; include author and Slack permalink."),
-    slack_channel_id: z.string().describe("From candidate.slack_channel_id"),
-    slack_ts: z.string().describe("From candidate.slack_ts"),
-  },
-  async (args) => {
-    try {
-      return ok(await createBugTicket(args));
-    } catch (err) {
-      return fail("create_bug_ticket", err);
-    }
-  },
-);
-
-const capturer = createSdkMcpServer({
-  name: "capturer",
-  version: "1.0.0",
-  tools: DRY_RUN ? [readCandidates] : [readCandidates, createIdea, createBug],
-});
-
-const LIVE_PROMPT = `You triage messages from Slack into Jira based on emoji reactions:
-  - 💡 (\`bulb\`) → Polaris Idea in project MPR
-  - 🐛 (\`bug\`)  → Bug ticket in project NET
-
-WORKFLOW (every run):
-1. Call \`mcp__capturer__get_reaction_candidates\` with channel="${CHANNEL}" and
-   since_hours=${SINCE_HOURS}. Already-filed messages are removed for you.
-2. For each candidate, dispatch by \`candidate.reaction\`:
-     - reaction == "bulb" → call \`mcp__capturer__create_polaris_idea\`
-     - reaction == "bug"  → call \`mcp__capturer__create_bug_ticket\`
-   Always pass slack_channel_id and slack_ts from the candidate so the Slack
-   confirmation reply lands in the right thread.
-   File each candidate exactly once. Never call a create tool twice for the
-   same slack_ts, even if a previous call returned an error.
-
-============================================================
-IDEA (reaction 💡 → MPR / Polaris)
-============================================================
-Pinned field IDs for project MPR (no discovery needed):
-  - project_key:                "MPR"
-  - idea_issue_type_id:         "10169"
-  - product_area_field_id:      "customfield_11018"
-  - planning_status_option_id:  "11275"  (Investigate)
-
-Product area option IDs (pick the closest match — never skip):
-  - User interfaces:           "11267"
-  - Smart control:             "11268"
-  - Integrations:              "11269"
-  - Reporting & Insights:      "11270"
-  - Zone asset adaptation:     "11273"
-
-Idea content (depends on candidate.source):
-  If source == "ybug":
-    - title: "Ybug - " + candidate.pre_title (≤ 80 chars total)
-    - description: candidate.text + author + permalink
-    - product_area: classify from text
-  If source == "template":
-    - title: candidate.pre_title verbatim (≤ 80 chars — truncate if needed)
-    - description: candidate.text + author + permalink
-    - product_area: if candidate.product_area is set, map directly to the
-      matching option ID (case-insensitive, tolerate "&"/"and"). Do NOT
-      re-classify when pre-tagged.
-  If source == "generic":
-    - title: concise summary of candidate.text (≤ 80 chars)
-    - description: candidate.text + author + permalink
-    - product_area: classify from text
-
-============================================================
-BUG (reaction 🐛 → NET)
-============================================================
-Pass to \`mcp__capturer__create_bug_ticket\`:
-  - title: concise headline (≤ 80 chars)
-      - source "ybug":     "Ybug - " + candidate.pre_title
-      - source "template": candidate.pre_title verbatim
-      - source "generic":  brief summary of candidate.text
-  - description: candidate.text + author + permalink
-
-============================================================
-FINAL SUMMARY (markdown)
-============================================================
-List each candidate with the outcome. Include the kind:
-  - 💡 <slack-permalink> → MPR-NNN  https://myrspoven.atlassian.net/browse/MPR-NNN
-  - 🐛 <slack-permalink> → NET-NNN  https://myrspoven.atlassian.net/browse/NET-NNN
-  - <slack-permalink> → FAILED: <reason>  (on failure)
-If no candidates, just say so.`;
-
-const DRY_PROMPT = `This is a dry run. You have exactly one tool and it only reads.
-Create nothing, and do not describe tickets as though they were created.
-
-1. Call \`mcp__capturer__get_reaction_candidates\` with channel="${CHANNEL}" and
-   since_hours=${SINCE_HOURS}.
-2. Report, in markdown:
-   - Total candidates returned (these are already deduped — anything filed in a
-     previous run has been removed).
-   - A count by \`reaction\` (bulb vs bug).
-   - A count by \`source\` (ybug / template / generic), and generic as a
-     percentage of the total. State these numbers plainly; they decide whether
-     the classification step can be replaced with deterministic code.
-   - For each candidate, one line: reaction, source, author, and the title that
-     *would* be used — for ybug/template that is pre_title, for generic your
-     one-line summary.
-   - Whether \`product_area\` was pre-tagged, per candidate.
-If there are no candidates, say so and stop.`;
+function writeStepSummary(outcomes: Outcome[]) {
+  const path = process.env.GITHUB_STEP_SUMMARY;
+  if (!path) return;
+  const rows = outcomes.map(
+    (o) => `| ${icon(o.reaction)} | ${o.status.replace(/_/g, " ")} | ${o.key ?? "—"} | ${o.error ?? ""} |`,
+  );
+  appendFileSync(path, ["| Reaction | Outcome | Issue | Note |", "|---|---|---|---|", ...rows, ""].join("\n"));
+}
 
 async function main() {
-  if (process.env.ANTHROPIC_API_KEY) {
-    // In non-interactive mode an API key always wins over the subscription, so
-    // leaving it set silently bills API credits — the exact failure this port
-    // exists to remove. Refuse rather than bill the wrong account.
-    throw new Error(
-      "ANTHROPIC_API_KEY is set. In headless mode it overrides CLAUDE_CODE_OAUTH_TOKEN " +
-        "and bills API credits instead of the Claude subscription. Unset it.",
-    );
+  const config = loadConfig();
+  const secrets = loadSecrets();
+  // `||` not `??`: a workflow_dispatch input left empty arrives as "" and Number("") is 0.
+  const sinceHours = Number(process.env.CAPTURE_SINCE_HOURS || config.slack.since_hours);
+  if (!Number.isFinite(sinceHours) || sinceHours <= 0) {
+    throw new Error(`CAPTURE_SINCE_HOURS must be a positive number, got "${process.env.CAPTURE_SINCE_HOURS}"`);
   }
-  if (!process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    throw new Error(
-      "CLAUDE_CODE_OAUTH_TOKEN is not set. Generate one with `claude setup-token`.",
-    );
+  const channel = config.slack.channel_id;
+  log(`[capture] channel=${channel} window=${sinceHours}h mode=${DRY_RUN ? "DRY-RUN (creates nothing)" : "LIVE"}`);
+
+  const slack = new SlackClient(secrets.slackBotToken, log);
+  const jira = new JiraClient(config.jira.site, secrets.atlassianEmail, secrets.atlassianApiToken, log);
+
+  const oldest = Math.floor(Date.now() / 1000 - sinceHours * 3600);
+  const messages = await slack.history(channel, oldest);
+  const candidates: Candidate[] = [];
+  for (const msg of messages) {
+    const reaction = detectReaction(msg);
+    if (reaction) candidates.push({ msg, reaction, parsed: parseMessage(msg), label: slackTsLabel(msg.ts) });
   }
-
-  console.log(
-    `[capture] model=${MODEL} channel=#${CHANNEL} window=${SINCE_HOURS}h` +
-      `${DRY_RUN ? " MODE=DRY-RUN (creates nothing)" : " MODE=LIVE"}`,
-  );
-
-  let streamed = "";
-
-  for await (const message of query({
-    prompt: DRY_RUN ? DRY_PROMPT : LIVE_PROMPT,
-    options: {
-      model: MODEL,
-      systemPrompt: DRY_RUN
-        ? "You are a read-only reporting assistant. You never invent results."
-        : LIVE_PROMPT,
-      maxTurns: MAX_TURNS,
-      mcpServers: { capturer },
-      allowedTools: DRY_RUN
-        ? ["mcp__capturer__get_reaction_candidates"]
-        : ["mcp__capturer__*"],
-      // Strip every built-in: this agent has no business reading files,
-      // running bash, or searching the web.
-      tools: [],
-    },
-  })) {
-    if (message.type === "system" && message.subtype === "init") {
-      const unavailable = message.mcp_servers.filter(
-        (s: { status: string }) => s.status === "failed" || s.status === "needs-auth",
-      );
-      if (unavailable.length > 0) {
-        console.error("[mcp] unavailable:", JSON.stringify(unavailable));
-      }
-    }
-
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "text") {
-          streamed += block.text;
-          process.stdout.write(block.text);
-        }
-        if (block.type === "tool_use") console.log(`\n[tool] ${block.name}`);
-      }
-    }
-
-    if (message.type === "result") {
-      if (message.subtype !== "success") {
-        throw new Error(`Agent run ended: ${message.subtype}`);
-      }
-      // The result is normally the last assistant message, already streamed
-      // above. Only echo it if it wasn't, so the log isn't duplicated.
-      if (!streamed.includes(message.result.trim())) {
-        console.log(`\n\n=== Summary ===\n${message.result}`);
-      }
-    }
+  log(`[scan] ${messages.length} messages in window, ${candidates.length} with a 💡/🐛 reaction`);
+  if (candidates.length === 0) {
+    log("No candidates.");
+    return;
   }
 
-  console.log();
+  // Two independent markers: the Jira label set at creation, and the Slack
+  // reply posted afterwards. Either one means "already filed".
+  const filedInJira = await jira.findLabels(candidates.map((c) => c.label));
+  const fresh: Candidate[] = [];
+  for (const c of candidates) {
+    if (filedInJira.has(c.label)) continue;
+    if (await slack.hasConfirmation(channel, c.msg.ts)) continue;
+    fresh.push(c);
+  }
+  log(`[dedup] ${candidates.length} candidates, ${candidates.length - fresh.length} already filed, ${fresh.length} fresh`);
+  if (fresh.length === 0) {
+    log("Nothing new to file.");
+    return;
+  }
+
+  const outcomes: Outcome[] = [];
+  const filedThisRun = new Set<string>();
+  for (const c of fresh) {
+    if (filedThisRun.has(c.msg.ts)) continue;
+    const kind = c.reaction === "bulb" ? "Idea" : "Bug";
+    try {
+      const draft = await prepare(c, config, slack);
+      if (VERBOSE) {
+        const area = draft.productArea ? ` [${draft.productArea.name}]` : "";
+        log(`  ${icon(c.reaction)} ${c.parsed.source.padEnd(8)} "${draft.title}"${area} by ${draft.author}`);
+        log(`     ${draft.permalink}`);
+      }
+      if (DRY_RUN) continue;
+
+      const { key, url, dropped } = await jira.createIssue(draft.fields, draft.optionalFieldIds);
+      if (dropped.length > 0) log(`   fields not accepted by Jira and left empty: ${dropped.join(", ")}`);
+      filedThisRun.add(c.msg.ts);
+      try {
+        await withRetry(
+          () => slack.postThreadReply(channel, c.msg.ts, confirmationText(kind, key, url, draft.title)),
+          { label: "slack reply", log },
+        );
+        outcomes.push({ reaction: c.reaction, status: "created", key });
+        log(`${icon(c.reaction)} → ${key}`);
+      } catch (err) {
+        // The issue exists and carries its label, so the next run will not
+        // re-file it. Still a failure: the submitter never got their reply.
+        outcomes.push({ reaction: c.reaction, status: "created_no_reply", key, error: errorMessage(err) });
+        log(`${icon(c.reaction)} → ${key} (created, but the Slack reply failed: ${errorMessage(err)})`);
+      }
+    } catch (err) {
+      outcomes.push({ reaction: c.reaction, status: "failed", error: errorMessage(err) });
+      log(`${icon(c.reaction)} → FAILED: ${errorMessage(err)}`);
+    }
+  }
+
+  if (DRY_RUN) {
+    log(`Dry run: ${fresh.length} would be filed. Nothing was created.`);
+    return;
+  }
+  writeStepSummary(outcomes);
+  const problems = outcomes.filter((o) => o.status !== "created");
+  if (problems.length > 0) {
+    log(`${problems.length} of ${outcomes.length} need attention.`);
+    process.exitCode = 1;
+  }
 }
 
 main().catch((err) => {
-  console.error(`\nCapture aborted: ${err instanceof Error ? err.message : String(err)}`);
+  console.error(`\nCapture aborted: ${errorMessage(err)}`);
   console.error(
-    "Re-run once fixed. Reactions stay capturable for 7 days after they are posted — " +
-      "a failure lasting longer than that drops them silently.",
+    "Nothing is lost: reactions stay in the channel and the next run picks them up, as long as it happens inside the look-back window.",
   );
-  process.exit(1);
+  process.exit(2);
 });

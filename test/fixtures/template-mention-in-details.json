@@ -1,0 +1,6 @@
+{
+  "type": "message",
+  "ts": "1700000003.000400",
+  "text": "<@U0000000001> - submitted feedback\n\n• Title: Allow longer error messages\n• Product: Integrations\n• Type: Pain point\n• Impact: 3\n\nDetails:\nDiscussed with <@U0000000009> who hit the 200 character cap yesterday.",
+  "reactions": [{ "name": "bulb", "users": ["U0000000003"], "count": 1 }]
+}

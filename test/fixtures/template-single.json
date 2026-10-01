@@ -1,0 +1,6 @@
+{
+  "type": "message",
+  "ts": "1700000001.000200",
+  "text": "<@U0000000001> - submitted feedback\n\n• Title: Show owning company on the building page\n• Product: User interfaces\n• Type: Idea\n• Impact: 3\n\nDetails:\nCan we show which company a building belongs to?",
+  "reactions": [{ "name": "bulb", "users": ["U0000000003"], "count": 1 }]
+}

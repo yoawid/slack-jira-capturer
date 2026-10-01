@@ -1,23 +1,22 @@
 {
-  "name": "agent-experiment",
+  "name": "slack-jira-capturer",
   "private": true,
   "type": "module",
+  "description": "Files emoji-reacted Slack messages as Jira issues. Deterministic, config-driven, no model in the loop.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "setup": "tsx setup.ts",
-    "update": "tsx update.ts",
-    "capture": "tsx run.ts",
-    "capture:agent": "tsx capture.ts",
-    "capture:check": "CAPTURE_DRY_RUN=1 tsx capture.ts"
+    "capture": "tsx capture.ts",
+    "capture:dry": "tsx capture.ts --dry-run",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.231",
-    "@anthropic-ai/sdk": "^0.116.0",
     "dotenv": "^17.2.0",
-    "js-yaml": "^4.1.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"

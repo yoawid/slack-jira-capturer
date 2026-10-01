@@ -1,185 +1,98 @@
-# Slack-to-Jira Capturer
+# slack-jira-capturer
 
-A Claude Managed Agent that watches `#product-management` in Slack and files
-emoji-reacted messages into Jira:
+React to a Slack message with 💡 and it becomes an idea in Jira Product Discovery. React with 🐛 and it becomes a bug in a Jira Software project. The tool replies in the thread with a link, runs once a day on GitHub Actions, and costs nothing to operate.
 
-- 💡 (`:bulb:`) → **Polaris Idea** in project **MPR**
-- 🐛 (`:bug:`) → **Bug** in project **NET**
+This is the third version. The first two had a language model in the loop. This one does not, and the reason why is the most useful thing in this repository.
 
-After filing, posts a threaded confirmation reply in Slack with a link to
-the new issue. Manually triggered for now (`npm run capture`).
+## The short version
+
+I built an agent to triage product feedback from Slack into Jira. It ran for fourteen weeks. In that time it filed sixteen tickets, and for fifteen of them the title was already written by a human in a form or by a bug-reporting widget. The model's genuine contributions were one title, three product-area guesses and four tie-breaks between product areas a submitter had picked. Every one of those is now a rule in [parsers.ts](parsers.ts). The model is gone, and with it the only component that ever caused an outage.
+
+## The numbers
+
+| | |
+|---|---|
+| Period observed | 5 May to 13 Aug 2026 (14 weeks), then 7 more weeks of daily runs |
+| Messages filed | 16 (13 ideas, 3 bugs), plus 2 duplicates from one incident |
+| Source of those messages | 10 from a Slack Workflow form, 5 from the Ybug widget, 1 free-text chat message |
+| Items where the model wrote the title | 1 |
+| Items where the model chose the product area from text | 3 (two Ybug reports, the free-text message) |
+| Items where the model picked one of several submitted product areas | 4 |
+| Daily runs after the last reaction | 48 consecutive runs that found nothing, each spinning up a model session |
+| Incidents | 2: a four-day outage when API credits ran out, and a double-filing race |
+
+Three tickets a month is roughly an hour of manual work per quarter. The automation was never going to pay for itself in saved clicks. It paid for itself as an experiment with a clear result, and the result was "not here".
+
+## Three versions, three lessons
+
+**v1, Managed Agents (May 2026).** A hosted agent with host-side custom tools, so Slack and Jira credentials never entered the sandbox. Billing ran on a personal API organisation. When its prepaid credits hit zero the cron failed silently for four days. Lesson: a chat subscription and API credits are separate ledgers, and topping up the wrong one looks exactly like topping up the right one until the next run fails.
+
+**v2, Claude Agent SDK (August 2026).** Same tools, now in-process, authenticated with a personal subscription token instead of API credits. Two manual runs started seven seconds apart. Dedup worked by looking for the bot's own confirmation reply in the Slack thread, which only exists after the ticket is created, so both runs saw "not filed yet" and both filed. Lesson: a marker that appears after the side effect is not an idempotency key. The fix was to queue concurrent runs rather than cancel them, because cancelling one between creating the issue and posting the reply would leave a ticket dedup could never see.
+
+**v3, this one (October 2026).** Plain TypeScript. The dedup marker is now a Jira label set in the create request itself, with the Slack reply kept as a second, independent signal. Slack history is paginated, where before a `limit=200` silently dropped the oldest part of a busy week. Transport errors are retried. A failed ticket makes the run exit non-zero so somebody actually hears about it. There is nothing left for a model to decide.
+
+## The alternative I considered
+
+The Jira Cloud for Slack app already has a "Create issue from" message shortcut, and it works for Product Discovery ideas. Two reasons it did not replace this tool: the people submitting the feedback form mostly do not have Jira seats, and a product manager triaging a channel wants one emoji per message, not one modal per message. If neither applies to you, use the shortcut and skip all of this.
 
 ## How it works
 
 ```
-   Slack #product-management            Anthropic                    Jira
-            │                              │                          ▲
-   💡 / 🐛 reactions                       │                          │
-            │                              │                          │
-            └─────► [run.ts]──── kickoff ──►│                          │
-                       ▲                    │                          │
-                       │                    │  agent loop              │
-                       │                    │  (Opus 4.7)              │
-                       │                    │     │                    │
-   custom tools ◄──────┼────────────────────┘     │                    │
-   (host-side):        │                          │                    │
-   - get_reaction_candidates ──► Slack Web API    │                    │
-   - create_polaris_idea     ─────────────────────┴──► REST → MPR / NET ┘
-   - create_bug_ticket       ──► (also posts threaded Slack reply)
+   Slack channel                 GitHub Actions (daily)                   Jira
+        │                                 │                                 ▲
+   💡 / 🐛 reaction                       │  1. read history (paginated)    │
+        │                                 │  2. parse: Ybug / form / text   │
+        └────────────────────────────────►│  3. dedup: Jira label           │
+                                          │           + Slack reply         │
+        ◄── threaded reply ───────────────│  4. create issue + label ───────┘
+                                          │  5. reply in thread
 ```
 
-**Why custom tools, not MCP?** Slack and Atlassian credentials live in
-`.env` on the host. The agent's sandbox container never sees them —
-`agent.custom_tool_use` events are handled by `run.ts`, which holds the
-secrets. No vault, no OAuth dance.
+| Slack source | How it is recognised | Title | Product area |
+|---|---|---|---|
+| Ybug widget | `bot_message` with footer `Reported via Ybug` | `Ybug - <report title>` | A configured default, since widget reports never state one |
+| Workflow form | text contains `submitted feedback` and a `Title:` bullet | Title field verbatim | First submitted value that matches a configured option. All values go into the description. |
+| Anything else | fallback | First line of the message, max 80 characters | Left empty for the triager |
 
-## Files
+Bugs skip product area. Every issue gets a label `slack-ts-<timestamp>` and a description ending in the author, the Slack permalink and the form's own Type and Impact. When the form's Impact is 1 to 5 it is also written to a Polaris rating field if one is configured.
 
-| File | Purpose |
-|---|---|
-| [agent.yaml](agent.yaml) | Agent config: system prompt, tools, pinned MPR field IDs |
-| [environment.yaml](environment.yaml) | Container config (cloud, unrestricted networking) |
-| [setup.ts](setup.ts) | One-time: creates the env + agent, prints IDs |
-| [update.ts](update.ts) | Pushes a new agent version after editing `agent.yaml` |
-| [run.ts](run.ts) | Per-run: opens session, handles custom tools, streams output |
-| [.env](.env) | Secrets + agent/env IDs (git-ignored) |
+## Run it yourself
 
-## Running it
+Requirements: Node 22, a Slack app with a bot token, an Atlassian API token.
 
 ```sh
-cd agent-experiment
-npm run capture
+npm ci
+cp capture.config.example.json capture.config.json   # channel, project keys, field IDs
+cp .env.example .env                                  # the three secrets
+npm run capture:dry                                   # reads, dedups, prints, creates nothing
+npm run capture                                       # files tickets
 ```
 
-Default window is **7 days** of Slack history (covers reactions added a few
-days late). Dedup looks back 7 days in Jira to avoid double-filing.
+Finding your IDs: `GET /rest/api/3/issue/createmeta/{projectKey}/issuetypes/{issueTypeId}` lists field IDs and option IDs. The Slack channel ID is in the channel's "About" panel.
 
-## Updating the agent
+Slack bot scopes: `channels:history`, `groups:history` (private channels), `reactions:read`, `users:read`, `chat:write`. Invite the bot to the channel. After changing scopes, reinstall the app.
 
-After editing `agent.yaml`:
+### Deploying
+
+The workflow in [.github/workflows/capture-ideas.yml](.github/workflows/capture-ideas.yml) runs daily at 04:47 UTC, or on demand. It is gated on a repository variable, `CAPTURE_ENABLED=true`, and reads the config from another variable, `CAPTURE_CONFIG_JSON`. Secrets `SLACK_BOT_TOKEN`, `ATLASSIAN_EMAIL` and `ATLASSIAN_API_TOKEN` come from repository secrets.
+
+Run it from a **private** repository. GitHub Actions logs in a public repository are readable by anyone, and even with titles suppressed the logs show issue keys and volume. The intended setup is this public repository for the code and a private fork, with the variables and secrets, for production. Keep the fork current with `git pull upstream main`.
+
+Two GitHub behaviours worth knowing: scheduled workflows in public repositories are disabled after 60 days without a commit, and cron triggers routinely fire hours late. Neither matters for a daily triage inbox once the runner is private.
+
+## Known limits
+
+- Reactions on replies inside a thread are not seen; only top-level messages are scanned.
+- The look-back window (`since_hours`, default 168) bounds how late a reaction can be added and still be picked up.
+- Tickets filed by earlier versions carry no label; for those, dedup relies on the Slack reply alone.
+- Only `:bulb:`, `:light_bulb:` and `:bug:` count. When a message has both, bug wins.
+- Jira's search index lags creation by a few seconds. Two runs seconds apart are serialised by the workflow's concurrency group; two separate deployments pointed at the same channel are not.
+
+## Development
 
 ```sh
-npm run update    # creates a new agent version, sessions auto-use the latest
+npm run typecheck
+npm test
 ```
 
-The agent is **persistent and versioned** — `npm run setup` is a one-time
-step. Don't run it again unless you want a fresh agent.
-
-## Reactions and routing
-
-| Reaction | Project | Issue type | Fields filled |
-|---|---|---|---|
-| 💡 `:bulb:` (or `:light_bulb:`) | MPR (Polaris) | Idea (id `10169`) | Title, Description, Product area (auto-classified or pre-tagged), Planning status = *Investigate* |
-| 🐛 `:bug:` | NET | Bug (id `10004`) | Title (summary), Description (with Slack link) |
-
-Both produce a threaded Slack reply on the original message:
-> 🤖 *Created a* `Idea` *from this message:* `MPR-NNN: Title` • Status: *Investigate*
-
-## Message classification (💡 ideas only)
-
-| Slack source | Detection | Title format | Product area |
-|---|---|---|---|
-| **Ybug** bug report | bot_message + `Reported via Ybug` footer | `"Ybug - <ticket title>"` | LLM classifies |
-| **Slack Workflow** template | text contains `submitted feedback` + `Title:`/`Product:` bullets | Title field verbatim | **Pre-tagged** Product → mapped directly to MPR option |
-| Generic chat message | anything else | LLM-generated summary | LLM classifies |
-
-Pre-extraction happens deterministically in `run.ts` (parsers `parseYbug`,
-`parseTemplate`); the LLM only judges generic messages and titles when no
-pre-title is set. Bugs (🐛) skip product-area entirely.
-
-## Dedup
-
-Before processing, `get_reaction_candidates` JQL-searches **both projects**
-for tickets created in the last 7 days whose description contains a Slack
-permalink, builds a set of already-filed permalinks, and filters them out.
-
-```jql
-((project = MPR AND issuetype = Idea) OR (project = NET AND issuetype = Bug))
-AND created >= -7d AND description ~ "slack.com"
-```
-
-If a message was filed >7 days ago and re-reacted, dedup will miss it.
-Widen the window in `findFiledPermalinks` if needed.
-
-## MPR field IDs (pinned)
-
-Discovered on first run, baked into `agent.yaml`:
-
-- **Idea issue type:** `10169`
-- **Product area** field: `customfield_11018`
-  - User interfaces: `11267`
-  - Smart control: `11268`
-  - Integrations: `11269`
-  - Reporting & Insights: `11270`
-  - Zone asset adaptation: `11273`
-- **Planning status** field: `customfield_10754`
-  - Investigate: `11275`
-
-## NET field IDs (pinned)
-
-- **Bug issue type:** `10004` (hard-coded in `run.ts` as `NET_BUG_ISSUE_TYPE_ID`)
-
-## Required environment variables (`.env`)
-
-```
-SLACK_BOT_TOKEN=xoxb-...
-ATLASSIAN_SITE=myrspoven.atlassian.net
-ATLASSIAN_EMAIL=yoann@myrspoven.com
-ATLASSIAN_API_TOKEN=...
-ANTHROPIC_API_KEY=sk-ant-api03-...
-AGENT_ID=agent_...
-ENV_ID=env_...
-```
-
-The `.env` file must be **UTF-8** (Windows PowerShell defaults to UTF-16 BOM
-which breaks Node — convert with `iconv -f UTF-16LE -t UTF-8` if needed).
-
-## Slack scopes required
-
-Bot Token Scopes (set in api.slack.com/apps → OAuth & Permissions):
-
-- `channels:history` — read messages from public channels
-- `channels:read` — resolve `#product-management` to a channel ID
-- `groups:history` + `groups:read` — same for private channels
-- `reactions:read` — see emoji reactions
-- `users:read` — resolve user IDs to display names
-- `chat:write` — post threaded confirmation replies
-
-After adding scopes you must **Reinstall to Workspace** for the bot token
-to gain them. The token string itself doesn't change.
-
-## Troubleshooting
-
-| Symptom | Likely cause |
-|---|---|
-| `Could not resolve authentication method` | Running inside Claude Code's bash (presets `ANTHROPIC_API_KEY=""`). Run from a regular PowerShell/terminal instead. |
-| `npm.ps1 cannot be loaded because running scripts is disabled` | One-time fix: `Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned` |
-| `Channel #X not found or bot not invited` | Bot needs `/invite @<bot-name>` in the channel |
-| `[slack reply] failed: missing_scope` | Add `chat:write` to bot scopes and reinstall the app |
-| `[dedup] 0 candidates already filed` but you see duplicates in MPR/NET | Existing tickets don't have the Slack permalink in their description. Dedup only catches tickets this agent filed. |
-| Idea created with wrong Product area | The `Product:` field text in the Workflow form doesn't match any of the 5 known options. Check the form's options. |
-| Agent says "no candidates" but you reacted | Reaction emoji might be a custom workspace emoji or a variant (`:bulb_solid:`, etc.). Only `:bulb:` / `:light_bulb:` / `:bug:` are matched. |
-
-## Next steps (not implemented)
-
-- **Trigger automation** — wire `npm run capture` to a daily cron (GitHub
-  Actions recommended), a button in the existing Vite/Express backoffice,
-  or a Slack slash command.
-- **Multi-channel** — parameterize the channel list, or run for several
-  channels per session.
-- **Smarter dedup** — match on Slack `ts` rather than full permalink to
-  survive reposts.
-- **More reactions / projects** — extend `detectReaction` and add
-  `create_<kind>_ticket` for other project routings.
-
-## Cost estimate
-
-Per run with dedup working:
-
-| Scenario | Cost |
-|---|---|
-| 0 candidates (most days) | ~$0.02 |
-| 1 issue created | ~$0.05 |
-| 3 issues created | ~$0.10 |
-
-Daily cron: typically **$1–3 / month** for a single channel.
+Parsers are pure functions tested against anonymised fixtures in [test/fixtures](test/fixtures). Everything that talks to a network lives in [slack.ts](slack.ts) and [jira.ts](jira.ts).
