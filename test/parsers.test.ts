@@ -166,3 +166,11 @@ test("dedup label round-trips a Slack ts", () => {
   assert.equal(tsFromLabel("slack-ts-1700000001-000200"), "1700000001.000200");
   assert.equal(tsFromLabel("something-else"), null);
 });
+
+test("confirmation text is recognised by the dedup regex, old and new wording alike", async () => {
+  const { CONFIRMATION_RE, confirmationText } = await import("../slack.ts");
+  assert.match(confirmationText("Idea", "PROJ-1", "https://x/browse/PROJ-1", "T & <t>"), /Created an Idea from this message: <https:\/\/x\/browse\/PROJ-1\|PROJ-1: T &amp; &lt;t&gt;>/);
+  assert.match(confirmationText("Bug", "BUG-2", "https://x/browse/BUG-2", "t"), /Created a Bug from this message:/);
+  assert.match(":robot_face: Created a Idea from this message: <u|k: t>  •  Status: *Investigate*", CONFIRMATION_RE); // legacy replies
+  assert.doesNotMatch("Created an issue from this message:", CONFIRMATION_RE);
+});

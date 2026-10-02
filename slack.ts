@@ -24,11 +24,12 @@ export type SlackMessage = {
 // The threaded reply posted after filing, and the regex that recognises it on
 // later runs. They live together so one cannot drift from the other. Replies
 // posted by earlier versions of this tool match the same regex.
-export const CONFIRMATION_RE = /Created a (Bug|Idea) from this message:/;
+export const CONFIRMATION_RE = /Created an? (Bug|Idea) from this message:/;
 
 export function confirmationText(kind: "Idea" | "Bug", key: string, url: string, title: string): string {
   const label = `${key}: ${title}`.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  return `:robot_face: Created a ${kind} from this message: <${url}|${label}>`;
+  const article = kind === "Idea" ? "an" : "a";
+  return `:robot_face: Created ${article} ${kind} from this message: <${url}|${label}>`;
 }
 
 type Envelope = { ok: boolean; error?: string; response_metadata?: { next_cursor?: string } };
