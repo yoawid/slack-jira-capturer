@@ -8,20 +8,24 @@ This is the third version. The first two had a language model in the loop. This 
 
 I built an agent to triage product feedback from Slack into Jira. It ran for fourteen weeks. In that time it filed sixteen tickets, and for fifteen of them the title was already written by a human in a form or by a bug-reporting widget. The model's genuine contributions were one title, three product-area guesses and four tie-breaks between product areas a submitter had picked. Every one of those is now a rule in [parsers.ts](parsers.ts). The model is gone, and with it the only component that ever caused an outage.
 
+Could I have checked the volume before building? Yes. The channel history was sitting there, and a ten-minute count would have shown a handful of reactions a month. I built first. That is lesson zero; the rest of this document is what it cost to learn it, which turned out to be about three days of work spread over five months.
+
 ## The numbers
 
 | | |
 |---|---|
-| Period observed | 5 May to 13 Aug 2026 (14 weeks), then 7 more weeks of daily runs |
-| Messages filed | 16 (13 ideas, 3 bugs), plus 2 duplicates from one incident |
-| Source of those messages | 10 from a Slack Workflow form, 5 from the Ybug widget, 1 free-text chat message |
+| Period observed | Agent versions: 5 May to 1 Oct 2026 (21 weeks, all filing in the first 14). This version: since 2 Oct 2026 |
+| Messages filed | 16 by the agent versions (13 ideas, 3 bugs), 1 by this version so far, plus 2 duplicates from one incident |
+| Source of those messages | 11 from a Slack Workflow form, 5 from the Ybug widget, 1 free-text chat message |
+| Share of intake | The product-discovery backlog took in about 140 ideas in the year to October 2026 through several entry points. This channel produced 14 of them, plus 3 bugs filed in a separate project |
+| Effort | About a day per version, going by the commit history: roughly three days in total |
 | Items where the model wrote the title | 1 |
 | Items where the model chose the product area from text | 3 (two Ybug reports, the free-text message) |
 | Items where the model picked one of several submitted product areas | 4 |
 | Daily runs after the last reaction | 48 consecutive runs that found nothing, each spinning up a model session |
 | Incidents | 2: a four-day outage when API credits ran out, and a double-filing race |
 
-Three tickets a month is roughly an hour of manual work per quarter. The automation was never going to pay for itself in saved clicks. It paid for itself as an experiment with a clear result, and the result was "not here".
+Three tickets a month is roughly an hour of manual work per quarter, so three days of building was never going to pay for itself in saved clicks. It paid for itself as an experiment with a clear result, and the result was "not here". The reaction channel turned out to be about a tenth of how ideas reach the backlog; the other nine tenths arrive by hand, through a form, or through Jira's own Slack shortcut, and none of those needed an agent either.
 
 ## Three versions, three lessons
 
