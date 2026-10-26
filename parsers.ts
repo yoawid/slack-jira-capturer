@@ -3,7 +3,7 @@
 import type { SlackMessage } from "./slack.ts";
 
 export type Reaction = "bulb" | "bug";
-export type Source = "ybug" | "template" | "generic";
+export type Source = "ybug" | "aida" | "template" | "generic";
 
 const BULB_NAMES = ["bulb", "light_bulb"];
 const BUG_NAMES = ["bug"];
@@ -33,6 +33,8 @@ export type Parsed = {
   impact?: number;
   /** User ID named in the form header; the form is posted by a workflow, so msg.user is empty. */
   submitterId?: string;
+  /** Person named in a widget report ("Name (email)"); the post itself is by a bot. */
+  reporter?: string;
 };
 
 // Ybug posts a bot_message whose first attachment carries the report.
@@ -43,6 +45,44 @@ export function parseYbug(msg: SlackMessage): { title: string; body: string } | 
   const title = (a.title ?? "").replace(/^\[[^\]]+\]\s*/, "").trim();
   const summary = a.fields?.find((f) => f.title === "Summary")?.value ?? "";
   return { title: title || "Ybug report", body: summary || a.title || "" };
+}
+
+// AIDA's Feedback button posts through its own bot:
+//   *[AIDA] #18 Feedback* · *External* · production
+//   > the user's message, possibly over several quoted lines
+//   *Reporter:* Name (<mailto:a@b.se|a@b.se>) · company · role
+//   *Page:* <https://…|/path>
+//   *Building:* 1135 · Name
+//   *Client:* build … · Chrome 156 on Windows · 1536×798
+const AIDA_HEADER = /^\*\[AIDA\](?: #\d+)? Feedback\*/;
+
+export function parseAida(text: string): { title: string; body: string; reporter?: string } | null {
+  if (!AIDA_HEADER.test(text)) return null;
+  const lines = text.split("\n");
+  const quoted = lines.filter((l) => l.startsWith(">")).map((l) => l.replace(/^>\s?/, ""));
+  const message = quoted.join("\n").trim();
+  // Plain text for Jira: "Label:" without Slack bold, and the page as its full address.
+  const context = lines
+    .filter((l) => /^\*(Reporter|Page|Building|Client):\*/.test(l) || /^_No screenshot/.test(l))
+    .map((l) =>
+      l
+        .replace(/^\*(\w+):\*/, "$1:")
+        .replace(/^Page:\s*<([^|>]+)\|[^>]*>/, "Page: $1")
+        .replace(/^_(.*)_$/, "$1"),
+    );
+  const header = lines[0]!.replace(/\*/g, "").trim();
+  const reporterLine = lines.find((l) => l.startsWith("*Reporter:*"));
+  // "Name (<mailto:x|x>)" → "Name (x)"; drop company and role after the first " · ".
+  const reporter = reporterLine
+    ?.replace(/^\*Reporter:\*\s*/, "")
+    .split(" · ")[0]
+    ?.replace(/<mailto:[^|>]+\|([^>]+)>/g, "$1")
+    .trim();
+  return {
+    title: message.split("\n").find((l) => l.trim())?.trim() || "AIDA feedback",
+    body: [message || "(no message)", "", header, ...context].join("\n"),
+    reporter: reporter || undefined,
+  };
 }
 
 // Slack Workflow Builder form: "<@U…> - submitted feedback" followed by bullet fields.
@@ -87,6 +127,10 @@ export function extractGenericText(msg: SlackMessage): string {
 export function parseMessage(msg: SlackMessage): Parsed {
   const ybug = parseYbug(msg);
   if (ybug) return { source: "ybug", preTitle: ybug.title, body: ybug.body, productValues: [] };
+  const aida = parseAida(msg.text ?? "");
+  if (aida) {
+    return { source: "aida", preTitle: aida.title, body: aida.body, productValues: [], reporter: aida.reporter };
+  }
   const template = parseTemplate(msg.text ?? "");
   if (template) return { source: "template", ...template };
   return { source: "generic", body: extractGenericText(msg), productValues: [] };
@@ -127,6 +171,7 @@ function firstLine(text: string): string {
 export function deriveTitle(source: Source, preTitle: string | undefined, cleanBody: string, max = 80): string {
   let raw: string;
   if (source === "ybug") raw = `Ybug - ${preTitle ?? "report"}`;
+  else if (source === "aida") raw = `AIDA - ${preTitle ?? "feedback"}`;
   else if (source === "template") raw = preTitle ?? firstLine(cleanBody);
   else raw = firstLine(cleanBody);
   return truncate(raw.replace(/\s+/g, " ").trim(), max) || "(untitled)";

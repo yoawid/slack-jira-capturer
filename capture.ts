@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 dotenv.config({ quiet: true });
 
 import { appendFileSync } from "node:fs";
-import { loadConfig, loadSecrets, type Config } from "./config.ts";
+import { channelIds, loadConfig, loadSecrets, type Config } from "./config.ts";
 import { JiraClient, adf, slackTsLabel } from "./jira.ts";
 import {
   buildDescription,
@@ -29,7 +29,7 @@ const log = (message: string) => console.log(message);
 const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const icon = (reaction: Reaction) => (reaction === "bulb" ? "💡" : "🐛");
 
-type Candidate = { msg: SlackMessage; reaction: Reaction; parsed: Parsed; label: string };
+type Candidate = { channel: string; msg: SlackMessage; reaction: Reaction; parsed: Parsed; label: string };
 
 type Outcome = {
   reaction: Reaction;
@@ -41,7 +41,8 @@ type Outcome = {
 async function resolveAuthor(c: Candidate, slack: SlackClient): Promise<string> {
   const { msg, parsed, reaction } = c;
   let author: string;
-  if (msg.user) author = await slack.userName(msg.user);
+  if (parsed.reporter) author = `${parsed.reporter} (via ${parsed.source === "aida" ? "AIDA feedback" : "widget"})`;
+  else if (msg.user) author = await slack.userName(msg.user);
   else if (parsed.submitterId) author = await slack.userName(parsed.submitterId);
   else if (msg.bot_profile?.name) author = `${msg.bot_profile.name} (bot)`;
   else if (msg.username) author = `${msg.username} (bot)`;
@@ -59,12 +60,14 @@ async function prepare(c: Candidate, config: Config, slack: SlackClient) {
   const body = stripSlackMarkup(parsed.body, names);
   const title = deriveTitle(parsed.source, parsed.preTitle, body);
   const author = await resolveAuthor(c, slack);
-  const permalink = await slack.permalink(config.slack.channel_id, msg.ts);
+  const permalink = await slack.permalink(c.channel, msg.ts);
 
   const idea = config.jira.idea;
   const areaConfig = reaction === "bulb" ? idea.product_area : undefined;
   const areaValues =
-    parsed.source === "ybug" && areaConfig?.default_for_ybug ? [areaConfig.default_for_ybug] : parsed.productValues;
+    (parsed.source === "ybug" || parsed.source === "aida") && areaConfig?.default_for_ybug
+      ? [areaConfig.default_for_ybug]
+      : parsed.productValues;
   const productArea = areaConfig ? mapProductArea(areaValues, areaConfig.options) : null;
 
   const description = buildDescription({
@@ -113,20 +116,38 @@ async function main() {
   if (!Number.isFinite(sinceHours) || sinceHours <= 0) {
     throw new Error(`CAPTURE_SINCE_HOURS must be a positive number, got "${process.env.CAPTURE_SINCE_HOURS}"`);
   }
-  const channel = config.slack.channel_id;
-  log(`[capture] channel=${channel} window=${sinceHours}h mode=${DRY_RUN ? "DRY-RUN (creates nothing)" : "LIVE"}`);
+  const channels = channelIds(config);
+  log(
+    `[capture] channels=${channels.join(",")} window=${sinceHours}h mode=${DRY_RUN ? "DRY-RUN (creates nothing)" : "LIVE"}`,
+  );
 
   const slack = new SlackClient(secrets.slackBotToken, log);
   const jira = new JiraClient(config.jira.site, secrets.atlassianEmail, secrets.atlassianApiToken, log);
 
   const oldest = Math.floor(Date.now() / 1000 - sinceHours * 3600);
-  const messages = await slack.history(channel, oldest);
   const candidates: Candidate[] = [];
-  for (const msg of messages) {
-    const reaction = detectReaction(msg);
-    if (reaction) candidates.push({ msg, reaction, parsed: parseMessage(msg), label: slackTsLabel(msg.ts) });
+  // One unreadable channel (bot not invited yet, say) must not stop the others.
+  // It still fails the run, so somebody hears about it.
+  let channelFailures = 0;
+  for (const channel of channels) {
+    let messages: SlackMessage[];
+    try {
+      messages = await slack.history(channel, oldest);
+    } catch (err) {
+      channelFailures++;
+      log(`[scan] ${channel}: could not read history: ${errorMessage(err)}`);
+      continue;
+    }
+    let found = 0;
+    for (const msg of messages) {
+      const reaction = detectReaction(msg);
+      if (!reaction) continue;
+      candidates.push({ channel, msg, reaction, parsed: parseMessage(msg), label: slackTsLabel(msg.ts) });
+      found++;
+    }
+    log(`[scan] ${channel}: ${messages.length} messages in window, ${found} with a 💡/🐛 reaction`);
   }
-  log(`[scan] ${messages.length} messages in window, ${candidates.length} with a 💡/🐛 reaction`);
+  if (channelFailures > 0) process.exitCode = 1;
   if (candidates.length === 0) {
     log("No candidates.");
     return;
@@ -138,7 +159,7 @@ async function main() {
   const fresh: Candidate[] = [];
   for (const c of candidates) {
     if (filedInJira.has(c.label)) continue;
-    if (await slack.hasConfirmation(channel, c.msg.ts)) continue;
+    if (await slack.hasConfirmation(c.channel, c.msg.ts)) continue;
     fresh.push(c);
   }
   log(`[dedup] ${candidates.length} candidates, ${candidates.length - fresh.length} already filed, ${fresh.length} fresh`);
@@ -150,7 +171,7 @@ async function main() {
   const outcomes: Outcome[] = [];
   const filedThisRun = new Set<string>();
   for (const c of fresh) {
-    if (filedThisRun.has(c.msg.ts)) continue;
+    if (filedThisRun.has(`${c.channel}:${c.msg.ts}`)) continue;
     const kind = c.reaction === "bulb" ? "Idea" : "Bug";
     try {
       const draft = await prepare(c, config, slack);
@@ -163,10 +184,10 @@ async function main() {
 
       const { key, url, dropped } = await jira.createIssue(draft.fields, draft.optionalFieldIds);
       if (dropped.length > 0) log(`   fields not accepted by Jira and left empty: ${dropped.join(", ")}`);
-      filedThisRun.add(c.msg.ts);
+      filedThisRun.add(`${c.channel}:${c.msg.ts}`);
       try {
         await withRetry(
-          () => slack.postThreadReply(channel, c.msg.ts, confirmationText(kind, key, url, draft.title)),
+          () => slack.postThreadReply(c.channel, c.msg.ts, confirmationText(kind, key, url, draft.title)),
           { label: "slack reply", log },
         );
         outcomes.push({ reaction: c.reaction, status: "created", key });

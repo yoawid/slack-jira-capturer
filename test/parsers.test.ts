@@ -8,6 +8,7 @@ import {
   detectReaction,
   mapProductArea,
   mentionedUserIds,
+  parseAida,
   parseMessage,
   parseTemplate,
   parseYbug,
@@ -173,4 +174,28 @@ test("confirmation text is recognised by the dedup regex, old and new wording al
   assert.match(confirmationText("Bug", "BUG-2", "https://x/browse/BUG-2", "t"), /Created a Bug from this message:/);
   assert.match(":robot_face: Created a Idea from this message: <u|k: t>  •  Status: *Investigate*", CONFIRMATION_RE); // legacy replies
   assert.doesNotMatch("Created an issue from this message:", CONFIRMATION_RE);
+});
+
+test("AIDA feedback: message becomes the title, the reporter is credited, context stays in the body", () => {
+  const parsed = parseMessage(fixture("aida"));
+  assert.equal(parsed.source, "aida");
+  assert.equal(parsed.preTitle, "Blueprints look stretched after the import");
+  assert.equal(parsed.reporter, "Jane Doe (jane.doe@example.com)");
+  assert.match(parsed.body, /^Blueprints look stretched after the import\nand the header is cut in half\./);
+  assert.match(parsed.body, /\[AIDA\] #18 Feedback · External · production/);
+  assert.match(parsed.body, /^Building: 1565 · Example House 1$/m);
+  assert.match(parsed.body, /^Page: https:\/\/app\.example\.com\/properties\/1565\/config\/blueprints$/m);
+  assert.match(parsed.body, /^Reporter: Jane Doe/m);
+  assert.equal(
+    deriveTitle(parsed.source, parsed.preTitle, stripSlackMarkup(parsed.body)),
+    "AIDA - Blueprints look stretched after the import",
+  );
+  assert.equal(detectReaction(fixture("aida")), "bulb");
+});
+
+test("AIDA feedback: other bot posts and look-alikes are not taken for it", () => {
+  assert.equal(parseAida("[AIDA] Feedback without the bold"), null);
+  assert.equal(parseAida("Someone wrote *[AIDA] #3 Feedback* mid-sentence"), null);
+  assert.notEqual(parseAida("*[AIDA] Feedback* · *Myrspoven* · local\n> hi"), null);
+  assert.equal(parseAida("*[AIDA] Feedback* · *Myrspoven* · local\n> hi")?.reporter, undefined);
 });

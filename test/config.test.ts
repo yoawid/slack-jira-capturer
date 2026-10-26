@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { loadSecrets, parseConfig } from "../config.ts";
+import { channelIds, loadSecrets, parseConfig } from "../config.ts";
 
 const example = readFileSync(new URL("../capture.config.example.json", import.meta.url), "utf8");
 
@@ -27,4 +27,17 @@ test("secrets: every missing variable is named", () => {
     atlassianEmail: "b",
     atlassianApiToken: "c",
   });
+});
+
+test("channels: the old single key still works, a list adds to it, duplicates collapse", () => {
+  const base = JSON.parse(example);
+  assert.deepEqual(channelIds(parseConfig(JSON.stringify(base), "x")), ["C0XXXXXXXXX"]);
+  base.slack.channel_ids = ["C0YYYYYYYYY", "C0XXXXXXXXX"];
+  assert.deepEqual(channelIds(parseConfig(JSON.stringify(base), "x")), ["C0XXXXXXXXX", "C0YYYYYYYYY"]);
+  delete base.slack.channel_id;
+  assert.deepEqual(channelIds(parseConfig(JSON.stringify(base), "x")), ["C0YYYYYYYYY", "C0XXXXXXXXX"]);
+  base.slack.channel_ids = [];
+  assert.throws(() => parseConfig(JSON.stringify(base), "x"), /channel_id/);
+  base.slack.channel_ids = ["not-a-channel"];
+  assert.throws(() => parseConfig(JSON.stringify(base), "x"), /channel ID/);
 });

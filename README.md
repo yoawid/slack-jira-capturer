@@ -55,6 +55,7 @@ The Jira Cloud for Slack app already has a "Create issue from" message shortcut,
 | Slack source | How it is recognised | Title | Product area |
 |---|---|---|---|
 | Ybug widget | `bot_message` with footer `Reported via Ybug` | `Ybug - <report title>` | A configured default, since widget reports never state one |
+| AIDA Feedback button | text starts with `*[AIDA] Feedback*` or `*[AIDA] #N Feedback*` | `AIDA - <first line of the message>` | The same configured default. The reporter named in the post is credited as author |
 | Workflow form | text contains `submitted feedback` and a `Title:` bullet | Title field verbatim | First submitted value that matches a configured option. All values go into the description. |
 | Anything else | fallback | First line of the message, max 80 characters | Left empty for the triager |
 
@@ -74,7 +75,9 @@ npm run capture                                       # files tickets
 
 Finding your IDs: `GET /rest/api/3/issue/createmeta/{projectKey}/issuetypes/{issueTypeId}` lists field IDs and option IDs. The Slack channel ID is in the channel's "About" panel.
 
-Slack bot scopes: `channels:history`, `groups:history` (private channels), `reactions:read`, `users:read`, `chat:write`. Invite the bot to the channel. After changing scopes, reinstall the app.
+Slack bot scopes: `channels:history`, `groups:history` (private channels), `reactions:read`, `users:read`, `chat:write`. Invite the bot to every channel it watches. After changing scopes, reinstall the app.
+
+Channels: `slack.channel_id` for one, `slack.channel_ids` for several; both may be set and are combined. A channel the bot cannot read is logged and fails the run, but the other channels are still processed.
 
 ### Deploying
 
