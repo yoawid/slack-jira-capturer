@@ -199,3 +199,8 @@ test("AIDA feedback: other bot posts and look-alikes are not taken for it", () =
   assert.notEqual(parseAida("*[AIDA] Feedback* · *Myrspoven* · local\n> hi"), null);
   assert.equal(parseAida("*[AIDA] Feedback* · *Myrspoven* · local\n> hi")?.reporter, undefined);
 });
+
+test("AIDA feedback: the quote marker is found encoded (API text) and decoded", () => {
+  assert.equal(parseAida("*[AIDA] Feedback* · *External* · production\n&gt; Chart is empty")?.title, "Chart is empty");
+  assert.equal(parseAida("*[AIDA] Feedback* · *External* · production\n> Chart is empty")?.title, "Chart is empty");
+});

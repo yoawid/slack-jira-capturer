@@ -59,7 +59,8 @@ const AIDA_HEADER = /^\*\[AIDA\](?: #\d+)? Feedback\*/;
 export function parseAida(text: string): { title: string; body: string; reporter?: string } | null {
   if (!AIDA_HEADER.test(text)) return null;
   const lines = text.split("\n");
-  const quoted = lines.filter((l) => l.startsWith(">")).map((l) => l.replace(/^>\s?/, ""));
+  // Slack's API text encodes the quote marker as "&gt;"; decoded copies have ">".
+  const quoted = lines.filter((l) => /^(?:>|&gt;)/.test(l)).map((l) => l.replace(/^(?:>|&gt;)\s?/, ""));
   const message = quoted.join("\n").trim();
   // Plain text for Jira: "Label:" without Slack bold, and the page as its full address.
   const context = lines

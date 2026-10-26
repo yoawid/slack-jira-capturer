@@ -5,7 +5,7 @@
   "bot_profile": {
     "name": "AIDA Feedback"
   },
-  "text": "*[AIDA] #18 Feedback* · *External* · production\n> Blueprints look stretched after the import\n> and the header is cut in half.\n*Reporter:* Jane Doe (<mailto:jane.doe@example.com|jane.doe@example.com>) · example-properties · user\n*Page:* <https://app.example.com/properties/1565/config/blueprints|/properties/1565/config/blueprints>\n*Building:* 1565 · Example House 1\n*Client:* build abc1234 · Chrome 156 on Windows 10/11 · 1536×798",
+  "text": "*[AIDA] #18 Feedback* · *External* · production\n&gt; Blueprints look stretched after the import\n&gt; and the header is cut in half.\n*Reporter:* Jane Doe (<mailto:jane.doe@example.com|jane.doe@example.com>) · example-properties · user\n*Page:* <https://app.example.com/properties/1565/config/blueprints|/properties/1565/config/blueprints>\n*Building:* 1565 · Example House 1\n*Client:* build abc1234 · Chrome 156 on Windows 10/11 · 1536×798",
   "files": [
     {
       "id": "F0000000001",
